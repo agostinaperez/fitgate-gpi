@@ -1,0 +1,119 @@
+services:
+
+  db:
+    image: mysql:8.0
+    container_name: soa_mysql
+    ports:
+      - "3306:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+#Redis + celery asincronismo entre la recepción de la imagen (API) y su procesamiento (embeddings), cosa de q el usuario no tenga q esperar
+#redis (Broker): lista de tareas.
+#celery (Worker): proceso en segundo plano que se dedica EXCLUSIVAMENTE a generar embeddings y reconocer rostros.
+#la API recibe la foto, la guarda en SeaweedFS, anota en MySQL que la tarea está "En Proceso", y deja un "ticket" en Redis.
+#le responde al usuario "Imagen recibida, tu ID es X". Por atras, Celery toma ese ticket de Redis, ejecuta la tarea y actualiza la base de datos con los resultados finales.
+  redis:
+    image: redis:alpine
+    container_name: soa_redis
+    ports:
+      - "6379:6379"
+
+  # SeaweedFS Master (Gestiona los volúmenes y metadata)
+  seaweed_master:
+    image: chrislusf/seaweedfs
+    container_name: soa_seaweed_master
+    ports:
+      - "9333:9333"
+      - "19333:19333"
+    command: "master -ip=seaweed_master"
+
+  # SeaweedFS Volume (Donde realmente se guardan los archivos)
+  seaweed_volume:
+    image: chrislusf/seaweedfs
+    command: "volume -mserver=seaweed_master:9333 -port=8080 -ip.bind=0.0.0.0"
+    ports:
+      - "8080"
+    depends_on:
+      - seaweed_master
+    volumes:
+      - /data
+  nginx:
+    image: nginx:1.23.3
+    container_name: soa_nginx
+    ports:
+      - "8000:80" # Ahora la máquina host expone el puerto 8000 a través de Nginx
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - api
+
+  api:
+    build:
+      context: ./app
+      dockerfile: Dockerfile.api
+    environment:
+      - SEAWEED_MASTER=http://seaweed_master:9333
+      - MYSQL_USER=${MYSQL_USER}
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD}
+      - MYSQL_DATABASE=${MYSQL_DATABASE}
+      - MYSQL_HOST=db
+      - CELERY_BROKER_URL=redis://redis:6379/0
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      seaweed_master:
+        condition: service_started
+      seaweed_volume:
+        condition: service_started
+    # Desfasaje de tiempo para evitar colisiones en MySQL.
+    command: >
+      sh -c "
+      echo 'Sincronizando réplica de la API...' &&
+      sleep \$(( (RANDOM % 10) + 1 )) &&
+      exec uvicorn main:app --host 0.0.0.0 --port 8000
+      "
+
+  # Worker Celery separado: concentra el reconocimiento facial (face_recognition) y sus dependencias nativas
+  # Esto evita inflar la imagen HTTP con librerías pesadas que solo sirven para inferencia
+  worker:
+    build:
+      context: ./app
+      dockerfile: Dockerfile.worker
+    environment:
+      - SEAWEED_MASTER=http://seaweed_master:9333
+      - MYSQL_USER=${MYSQL_USER}
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD}
+      - MYSQL_DATABASE=${MYSQL_DATABASE}
+      - MYSQL_HOST=db
+      - CELERY_BROKER_URL=redis://redis:6379/0
+       # Enviar confirmación (ACK) SOLO cuando la función finalice con éxito
+      - CELERY_TASK_ACKS_LATE=True
+      # Procesar estrictamente de a 1 tarea a la vez (evita inflar RAM con face_recognition)
+      - CELERY_WORKER_PREFETCH_MULTIPLIER=1
+      # Si el contenedor muere a mitad de ejecución, rechazar la tarea para que vuelva a Redis
+      - CELERY_TASK_REJECT_ON_WORKER_LOST=True
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      seaweed_master:
+        condition: service_started
+      seaweed_volume:
+        condition: service_started
+
+volumes:
+  mysql_data:
