@@ -9,6 +9,7 @@ facial
 - **Cola/worker**: Celery + Redis (procesamiento asincrónico de embeddings)
 - **Reconocimiento facial**: `face_recognition` + FAISS (index de vectores de 128 dims)
 - **Storage**: SeaweedFS (imágenes de rostro de las personas)
+- **Frontend**: Vue 3 + Vite + Vuetify 3 (interfaz gráfica mínima)
 - **Infra**: Docker Compose (MySQL, Redis, SeaweedFS, Nginx, API, Worker)
 
 ## Arquitectura
@@ -76,6 +77,26 @@ uvicorn app.main:app --reload --port 8000
 
 # 5. Worker (en otra terminal)
 celery -A app.worker.tasks worker --loglevel=info
+
+# 6. Frontend (en otra terminal)
+cd frontend
+npm ci
+npm run dev   # http://localhost:5173
 ```
 
 Documentación Swagger: `http://localhost:8000/docs`.
+
+## Frontend (etapa 1.5)
+
+Interfaz gráfica mínima en Vue 3 + Vuetify 3 (tema claro, tarjetas blancas con bordes
+grises sutiles y barra de navegación superior fija). Incluye tres vistas:
+
+- **Socios** (`/socios`): tabla de personas registradas con avatar, email, DNI y chips de
+  estado (cuota al día / membresía vencida, activo / inactivo). Botón oscuro para registrar
+  un nuevo socio con un diálogo que captura la primera foto del rostro.
+- **Enrolamiento** (`/enrolamiento`): autocompletado para buscar un socio y capturar/upload
+  de sus fotografías faciales (generación de vectores).
+- **Reconocimiento** (`/reconocimiento`): captura de un rostro y verificación contra los
+  socios enrolados; el resultado se muestra en pantalla y se emula mediante logs de consola.
+
+El frontend apunta por defecto a `http://localhost:8000/api/v1` (ver `frontend/.env.example`).
